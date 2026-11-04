@@ -13,8 +13,10 @@ use sqlx::{Connection, PgConnection, PgPool};
 
 use crate::tools::Workspace;
 
-/// The workspace table. Made at startup under an advisory lock, so replicas
-/// that start together make it once.
+/// The workspace table, also the list of sessions: every turn touches its
+/// row first, so `updated_at` is the session's last activity and expiry
+/// goes by it. Made at startup under an advisory lock, so replicas that
+/// start together make it once.
 const SCHEMA: &str = "
 SELECT pg_advisory_xact_lock(hashtext('agent_workspaces_schema'));
 CREATE TABLE IF NOT EXISTS agent_workspaces (
@@ -104,6 +106,51 @@ impl Store {
                 Ok(fresh.then(|| TurnLock::Memory { busy: busy.clone(), session: session.to_owned() }))
             }
         }
+    }
+
+    /// Marks the session as used now, so it expires counting from its last turn.
+    pub async fn touch(&self, session: &str) -> anyhow::Result<()> {
+        if let Backend::Postgres { pool, .. } = &self.backend {
+            sqlx::query(
+                "INSERT INTO agent_workspaces (session_id, workspace) VALUES ($1, $2)
+                 ON CONFLICT (session_id) DO UPDATE SET updated_at = now()",
+            )
+            .bind(session)
+            .bind(sqlx::types::Json(Workspace::default()))
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Deletes the sessions idle for longer than `idle`, with their history,
+    /// and returns how many went. One replica at a time does it; the others
+    /// return 0. In memory nothing expires: the process does not live that long.
+    pub async fn expire(&self, idle: std::time::Duration) -> anyhow::Result<u64> {
+        let Backend::Postgres { pool, .. } = &self.backend else { return Ok(0) };
+        let mut tx = pool.begin().await?;
+        let (ours,): (bool,) = sqlx::query_as("SELECT pg_try_advisory_xact_lock(hashtext('agent_expiry'))")
+            .fetch_one(&mut *tx)
+            .await?;
+        if !ours {
+            return Ok(0);
+        }
+        sqlx::query("DELETE FROM agent_workspaces WHERE updated_at < now() - make_interval(secs => $1)")
+            .bind(idle.as_secs_f64())
+            .execute(&mut *tx)
+            .await?;
+        // A conversation whose session row is gone: just expired, or from
+        // before sessions were touched. A running turn touched its row
+        // before rig saves its log, so it is never caught here.
+        sqlx::query("DELETE FROM rig_memory_log_chunks WHERE name NOT IN (SELECT session_id FROM agent_workspaces)")
+            .execute(&mut *tx)
+            .await?;
+        let gone = sqlx::query("DELETE FROM rig_memory_logs WHERE name NOT IN (SELECT session_id FROM agent_workspaces)")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+        Ok(gone)
     }
 
     pub async fn load_workspace(&self, session: &str) -> anyhow::Result<Workspace> {

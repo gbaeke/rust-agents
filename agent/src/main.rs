@@ -140,6 +140,9 @@ async fn chat(State(state): State<Arc<AppState>>, Json(request): Json<ChatReques
         }
         Err(error) => return internal_error(error),
     };
+    if let Err(error) = state.store.touch(&session_id).await {
+        return internal_error(error);
+    }
     let workspace = match state.store.load_workspace(&session_id).await {
         Ok(workspace) => SharedWorkspace::new(workspace),
         Err(error) => return internal_error(error),
@@ -295,6 +298,24 @@ async fn main() -> anyhow::Result<()> {
         _ = terminate.recv() => return Ok(()),
         _ = tokio::signal::ctrl_c() => return Ok(()),
     };
+
+    // Sessions idle for longer than SESSION_TTL_DAYS (default 7; 0 keeps them) are deleted hourly.
+    let ttl_days: f64 = std::env::var("SESSION_TTL_DAYS").ok().and_then(|days| days.parse().ok()).unwrap_or(7.0);
+    if ttl_days > 0.0 {
+        let state = state.clone();
+        let idle = std::time::Duration::from_secs_f64(ttl_days * 86_400.0);
+        tokio::spawn(async move {
+            let mut hourly = tokio::time::interval(std::time::Duration::from_secs(3_600));
+            loop {
+                hourly.tick().await;
+                match state.store.expire(idle).await {
+                    Ok(0) => {}
+                    Ok(gone) => tracing::info!("deleted {gone} conversations idle for over {ttl_days} days"),
+                    Err(error) => tracing::warn!("session expiry failed: {error:#}"),
+                }
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/", get(|| async { Html(include_str!("../static/index.html")) }))

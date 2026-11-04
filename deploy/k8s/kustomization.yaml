@@ -14,3 +14,4 @@ configMapGenerator:
       - AGENT_ADDR=0.0.0.0:3000
       - MCP_URL=http://mcp-server:8081/mcp
       - KB_DIR=/knowledge-base
+      - SESSION_TTL_DAYS=7

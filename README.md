@@ -36,6 +36,7 @@ The agent still starts if the MCP server is down. It runs without the MCP tools 
 | `MCP_ADDR` (mcp-server) | `127.0.0.1:8081` |
 | `KB_DIR` | `./knowledge-base` |
 | `DATABASE_URL` | unset: sessions in memory |
+| `SESSION_TTL_DAYS` | `7`; `0` keeps sessions forever |
 
 ## Run it in containers
 
@@ -94,6 +95,8 @@ Try the example prompts in the UI. Answering the SLA-credit questions takes the 
 - rig loads the history before the first model call and saves it only when the turn succeeds. A failed, cancelled or crashed turn adds nothing, and resending works.
 - A second message to a chat that is still busy gets `409 Conflict`, also when it reaches another replica.
 - `/readyz` fails while the database is unreachable.
+- **Expiry:** every turn updates its session's `updated_at`. At startup and then every hour, one replica deletes the sessions idle for longer than `SESSION_TTL_DAYS`, together with their history. A Postgres lock picks the replica. In memory nothing expires.
+- **Cleaning up by hand:** the UI's reset button deletes one chat. To delete all of them, run `kubectl -n rust-agents exec postgres-0 -- psql -U agent -d agent -c "TRUNCATE rig_memory_logs, rig_memory_log_chunks, agent_workspaces"`. `deploy/deploy.sh delete` also removes the database volume.
 
 ## Code map
 

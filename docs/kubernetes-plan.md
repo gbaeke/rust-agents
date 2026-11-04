@@ -23,6 +23,7 @@ Phase 2 as built:
   - SIGKILL of the pod mid-turn: no history saved, the plan saved up to the last tool, the lock released, and a resend worked.
   - Reset: no rows left.
   - Local run without a database: in memory.
+- Session expiry (added after review): each turn touches its `agent_workspaces` row first. Hourly, under a Postgres lock, one replica deletes rows idle for longer than `SESSION_TTL_DAYS` (default 7) and every `rig_memory_*` log that has no row. Verified with a chat backdated by 8 days.
 - Memory, idle: agent ~10 MiB per pod, mcp-server ~3 MiB, postgres ~37 MiB; the kind cluster itself ~1.3 GiB.
 
 ## Goal
