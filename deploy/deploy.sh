@@ -40,6 +40,9 @@ if ! k -n "$NAMESPACE" get secret postgres >/dev/null 2>&1; then
 fi
 k apply -k deploy/k8s
 k -n "$NAMESPACE" rollout status statefulset/postgres --timeout=180s
+# agentgateway's request logs (the admin UI's Analytics and Logs pages) live in their own database.
+psql() { k -n "$NAMESPACE" exec postgres-0 -- psql -U agent -d agent -tAc "$1"; }
+[[ "$(psql "SELECT 1 FROM pg_database WHERE datname = 'agentgateway'")" == 1 ]] || psql "CREATE DATABASE agentgateway" >/dev/null
 k -n "$NAMESPACE" wait --for=condition=Programmed gateway/agentgateway --timeout=120s
 k -n "$NAMESPACE" rollout status deployment/agentgateway --timeout=120s
 

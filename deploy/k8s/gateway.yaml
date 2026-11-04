@@ -41,6 +41,17 @@ spec:
   service:
     spec:
       type: ClusterIP
+  # Request logs in Postgres (database `agentgateway`, made by deploy/deploy.sh):
+  # the admin UI's Analytics and Logs pages show every LLM call from both
+  # replicas. There is no typed field for it, so it goes in as raw config.
+  env:
+    - name: POSTGRES_PASSWORD
+      valueFrom: { secretKeyRef: { name: postgres, key: password } }
+  rawConfig:
+    config:
+      logging:
+        database:
+          url: postgres://agent:${POSTGRES_PASSWORD}@postgres:5432/agentgateway
 ---
 # Claude, as a model the gateway serves on its standard paths, including
 # Anthropic's own /v1/messages in Anthropic's format. Only declared models are

@@ -72,6 +72,10 @@ open http://omarchy:30000
   - MCP uses `sessionRouting: Stateless`, because the MCP server keeps no sessions either.
   - NetworkPolicies enforce the gateway: agent pods may only reach the gateway, Postgres and DNS, and the MCP server only accepts requests from the gateway.
   - The gateway's log (`kubectl -n rust-agents logs deploy/agentgateway`) has one line per model call, with model and token counts, and one per MCP method.
+  - **Request logs and analytics:** both proxies write every LLM call (model, tokens, cost, duration, time to first token) to the Postgres database `agentgateway`, through `rawConfig` in `AgentgatewayParameters`. Prompts and completions are not stored. The admin UI's **Analytics** and **Logs** pages show them:
+    ```sh
+    kubectl -n rust-agents port-forward deploy/agentgateway 15000:15000   # http://localhost:15000/ui
+    ```
 - The database password is the Secret `postgres`. `deploy.sh` makes it once and then keeps it.
 - The API key goes into the Secret `agent-secrets`, taken from `.env`. Other settings are in the generated ConfigMap `agent-config` in `deploy/k8s/kustomization.yaml`.
 - On SIGTERM, both servers stop accepting requests and let running ones finish. A rollout or pod delete waits for the agent turn in progress, for up to 120s.
