@@ -1,0 +1,20 @@
+services:
+  mcp-server:
+    build: { context: ., target: mcp-server }
+    image: rust-agents/mcp-server
+    restart: unless-stopped
+    environment:
+      MCP_ALLOWED_HOSTS: mcp-server,mcp-server:8081,localhost,127.0.0.1
+    # Not published: only the agent talks to it, over the compose network.
+
+  agent:
+    build: { context: ., target: agent }
+    image: rust-agents/agent
+    restart: unless-stopped
+    env_file: .env          # ANTHROPIC_API_KEY, optional AGENT_MODEL
+    environment:
+      AGENT_ADDR: 0.0.0.0:3000
+      MCP_URL: http://mcp-server:8081/mcp
+    ports:
+      - "3000:3000"
+    depends_on: [mcp-server]
