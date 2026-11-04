@@ -10,7 +10,7 @@ mod task;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub use files::{EditFile, ListFiles, ReadFile, WriteFile};
 pub use knowledge::{ListDocuments, ReadDocument, SearchKnowledgeBase};
@@ -19,7 +19,7 @@ pub use task::Task;
 
 /// The state an agent builds up during a conversation: its plan and the
 /// files it wrote. It lives as long as the chat session.
-#[derive(Serialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Workspace {
     pub todos: Vec<Todo>,
     pub files: BTreeMap<String, String>,
@@ -29,6 +29,10 @@ pub struct Workspace {
 pub struct SharedWorkspace(Arc<Mutex<Workspace>>);
 
 impl SharedWorkspace {
+    pub fn new(workspace: Workspace) -> Self {
+        Self(Arc::new(Mutex::new(workspace)))
+    }
+
     pub fn lock(&self) -> MutexGuard<'_, Workspace> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }

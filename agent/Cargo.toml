@@ -10,11 +10,12 @@ axum = "0.8.9"
 bm25 = "2.3"
 dotenvy = "0.15.7"
 futures = "0.3.34"
-rig = { version = "0.46", features = ["rmcp"] }
+rig = { version = "0.46", features = ["rmcp", "memory", "postgres"] }
 rmcp = { version = "3.8", features = ["client", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "json", "tls-rustls-aws-lc-rs"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
 tracing = "0.1.44"

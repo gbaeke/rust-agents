@@ -1,11 +1,11 @@
-# One replica: chat sessions live in the pod's memory, so a second replica
-# could get a follow-up message without its history (phase 2 fixes this).
+# Stateless: history, plan and files are in Postgres, so any replica can
+# serve any message. A turn is one HTTP request and stays on one pod.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: agent
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels: { app: agent }
   template:
@@ -15,6 +15,12 @@ spec:
       automountServiceAccountToken: false
       # A deep-agent turn can take minutes; SIGTERM lets it finish first.
       terminationGracePeriodSeconds: 120
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: agent }
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -26,6 +32,13 @@ spec:
           envFrom:
             - configMapRef: { name: agent-config }
             - secretRef: { name: agent-secrets }   # ANTHROPIC_API_KEY, created by deploy/deploy.sh
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: postgres, key: password } }
+            - name: DATABASE_URL
+              value: postgres://agent:$(PGPASSWORD)@postgres:5432/agent
           ports:
             - { name: http, containerPort: 3000 }
           # Liveness only starts once this passes; startup waits up to 60s for the MCP server.

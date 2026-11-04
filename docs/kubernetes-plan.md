@@ -1,6 +1,6 @@
 # Plan: from Docker Compose to Kubernetes, then a stateless agent
 
-Status: **phase 1 implemented, phase 2 not started.**
+Status: **phases 1 and 2 implemented.** See the results for phase 2 below the phase 1 notes.
 
 Phase 1 as built differs from the draft below in these ways:
 - The cluster is generic and lives in `kind/` (`kind/cluster.sh install|up|start|stop|status|down`, cluster `dev`). It knows nothing about this app. Host ports 30000–30009 map 1:1 to NodePorts, and the agent uses 30000 (`http://omarchy:30000`). ufw-docker needs `sudo ufw route allow proto tcp from any to any port 30000:30009`.
@@ -8,6 +8,22 @@ Phase 1 as built differs from the draft below in these ways:
 - Tools were installed with mise (no sudo).
 - 1.4.3 MCP reconnect is **not needed**. After `rollout restart deploy/mcp-server` the agent's tools kept working, because the stateless MCP transport makes a new HTTP request for each call. D9 is settled.
 - Extra: each MCP connect attempt at startup is capped at 2s, and the agent has a `startupProbe`. Without these, a connect to an MCP pod that was going away hung for 30s, the liveness probe failed, and a container that was already terminating got restarted and stayed stuck in `Terminating` for minutes.
+
+Phase 2 as built:
+- Decisions taken as proposed: D3 in-memory fallback without `DATABASE_URL`, D7 own table `agent_workspaces` (the workspace as one JSONB column), D8 plain StatefulSet.
+- History goes through the agent's `.memory(store).conversation(session_id)`, which loads before the first model call and saves only when the turn succeeds. The log is named after the session id, so `/api/reset` deletes its `rig_memory_*` rows directly (rig's store has no delete).
+- Turn lock: `pg_try_advisory_lock(hashtext('agent_turn'), hashtext(session_id))` on a dedicated connection, not a pooled one, because a pooled connection would go back to the pool still holding the lock.
+- No HPA: CPU is a weak signal for this agent (see 2.6), and metrics-server is not installed.
+- Startup fix: as PID 1 in a container the agent ignored SIGTERM until its handler was installed, and that only happened after startup (DB and MCP connects). A pod stopped during startup then waited out the 120s grace period. Both servers now install the handler first. This was also behind the slow `Terminating` pods seen in phase 1.
+- Verified on kind:
+  - 3 agent pods over both workers.
+  - Message 1 to pod A and message 2 to pod B: B knew the history and the files.
+  - All agent pods deleted: the chat went on.
+  - A second message while busy: 409.
+  - SIGKILL of the pod mid-turn: no history saved, the plan saved up to the last tool, the lock released, and a resend worked.
+  - Reset: no rows left.
+  - Local run without a database: in memory.
+- Memory, idle: agent ~10 MiB per pod, mcp-server ~3 MiB, postgres ~37 MiB; the kind cluster itself ~1.3 GiB.
 
 ## Goal
 

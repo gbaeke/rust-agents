@@ -16,6 +16,7 @@ use rmcp::{
     },
 };
 use serde::Deserialize;
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use serde_json::{Value, json};
 
 /// Longest page text `fetch_url` returns, in characters.
@@ -226,6 +227,8 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
+    // Installed first: as PID 1 in a container the process ignores SIGTERM without a handler.
+    let terminate = signal(SignalKind::terminate())?;
     let addr = std::env::var("MCP_ADDR").unwrap_or_else(|_| "127.0.0.1:8081".to_owned());
     // Hostnames clients may use to reach us (DNS-rebinding protection), e.g.
     // `mcp-server` inside docker compose. Loopback only by default.
@@ -242,23 +245,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", axum::routing::get(|| async { "ok" }));
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("MCP server listening on http://{addr}/mcp");
-    axum::serve(listener, router).with_graceful_shutdown(shutdown_signal()).await?;
+    axum::serve(listener, router).with_graceful_shutdown(shutdown_signal(terminate)).await?;
     Ok(())
 }
 
 /// Resolves on Ctrl-C or SIGTERM (what Kubernetes and Docker send on stop).
-async fn shutdown_signal() {
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(_) => std::future::pending().await,
-        }
-    };
+async fn shutdown_signal(mut terminate: Signal) {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
-        _ = terminate => {}
+        _ = terminate.recv() => {}
     }
     tracing::info!("shutting down; waiting for running requests to finish");
 }

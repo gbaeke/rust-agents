@@ -1,0 +1,18 @@
+# Keep at least one of each serving during voluntary disruptions such as a node drain.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: agent
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: agent }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mcp-server
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: mcp-server }

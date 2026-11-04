@@ -35,6 +35,7 @@ The agent still starts if the MCP server is down. It runs without the MCP tools 
 | `MCP_URL` | `http://127.0.0.1:8081/mcp` |
 | `MCP_ADDR` (mcp-server) | `127.0.0.1:8081` |
 | `KB_DIR` | `./knowledge-base` |
+| `DATABASE_URL` | unset: sessions in memory |
 
 ## Run it in containers
 
@@ -62,7 +63,8 @@ open http://omarchy:30000
 - `deploy/deploy.sh` can be run again after code changes. `deploy/deploy.sh delete` removes the app.
 - `kind/cluster.sh stop` and `start` pause the cluster and resume it, keeping its state.
 - Everything runs in the namespace `rust-agents`, which enforces the `restricted` Pod Security Standard.
-- The MCP server runs as 2 replicas. The agent runs as 1, because its sessions are in memory.
+- The agent is **stateless** and runs as 3 replicas. History, plan and files are in Postgres (a StatefulSet with a 1 Gi volume), so any pod can take any message. A turn stays on one pod because it is one HTTP request. The MCP server runs as 2 replicas. Disruption budgets keep at least one of each running.
+- The database password is the Secret `postgres`. `deploy.sh` makes it once and then keeps it.
 - The API key goes into the Secret `agent-secrets`, taken from `.env`. Other settings are in the generated ConfigMap `agent-config` in `deploy/k8s/kustomization.yaml`.
 - On SIGTERM, both servers stop accepting requests and let running ones finish. A rollout or pod delete waits for the agent turn in progress, for up to 120s.
 - Health endpoints: `/healthz` on both servers, and `/readyz` on the agent.
@@ -79,15 +81,31 @@ The design follows LangChain's Deep Agents:
 
 Try the example prompts in the UI. Answering the SLA-credit questions takes the postmortem, the SLA document and the calculator together. For example, Bluefin's 4h12m outage gives 99.42% uptime, which earns a 15% credit on 140 × EUR 179.
 
+## Sessions
+
+`agent/src/store.rs` keeps a chat session in three parts:
+
+| Part | With `DATABASE_URL` | Without |
+|---|---|---|
+| history | rig's `PostgresSessionStore` (tables `rig_memory_*`) through the agent's `memory`/`conversation` | rig's `MemoryStore` |
+| plan and files | table `agent_workspaces`, saved after every tool result | a map in memory |
+| one turn at a time | `pg_try_advisory_lock` on its own connection, so a crash releases it | a set in memory |
+
+- rig loads the history before the first model call and saves it only when the turn succeeds. A failed, cancelled or crashed turn adds nothing, and resending works.
+- A second message to a chat that is still busy gets `409 Conflict`, also when it reaches another replica.
+- `/readyz` fails while the database is unreachable.
+
 ## Code map
 
 - `mcp-server/src/main.rs`: rmcp `#[tool_router]` server.
-- `agent/src/main.rs`: axum app, sessions, agent assembly, and the SSE translation of rig's `MultiTurnStreamItem`.
+- `agent/src/main.rs`: axum app, agent assembly, and the SSE translation of rig's `MultiTurnStreamItem`.
+- `agent/src/store.rs`: where sessions are kept (Postgres or memory) and the per-session turn lock.
 - `agent/src/tools/`: rig `Tool` implementations. Argument schemas are generated from Rust types with `schemars`.
 - `agent/src/kb.rs`: chunking by section, plus BM25 search through the `bm25` crate.
 
 ## Notes
 
-- Sessions live in memory and are lost on restart.
+- Without `DATABASE_URL`, sessions live in memory and are lost on restart.
+- The UI starts a new session on every page load. The server keeps the old ones, but the UI does not reopen them.
 - To use another provider, change the one `AnthropicConfig` line in `main.rs`. rig supports OpenAI, Gemini, Azure, Ollama and others.
 - `cargo test --workspace` tests the retrieval and the calculator.

@@ -30,7 +30,13 @@ k apply -f deploy/k8s/namespace.yaml
 # Only the key goes into the Secret, read from stdin so it never shows up in `ps`.
 k -n "$NAMESPACE" create secret generic agent-secrets --from-env-file=/dev/stdin \
   --dry-run=client -o yaml <<<"$key_line" | k apply -f -
+# The database password is made once and then kept: the database's data
+# volume was initialised with it.
+if ! k -n "$NAMESPACE" get secret postgres >/dev/null 2>&1; then
+  k -n "$NAMESPACE" create secret generic postgres --from-env-file=/dev/stdin <<<"password=$(openssl rand -hex 24)"
+fi
 k apply -k deploy/k8s
+k -n "$NAMESPACE" rollout status statefulset/postgres --timeout=180s
 
 # Same tag after a rebuild, so restart to pick up the newly loaded images.
 # Not on a first install: the pods were just created from them.

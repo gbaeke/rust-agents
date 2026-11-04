@@ -3,8 +3,10 @@ kind: Kustomization
 namespace: rust-agents
 resources:
   - namespace.yaml
+  - postgres.yaml
   - mcp-server.yaml
   - agent.yaml
+  - disruption-budgets.yaml
 configMapGenerator:
   - name: agent-config
     literals:

@@ -8,21 +8,21 @@
 
 mod events;
 mod kb;
+mod store;
 mod tools;
 
-use std::collections::HashMap;
-use std::convert::Infallible;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use rig::agent::{Agent, MultiTurnStreamItem};
-use rig::message::{Message, ToolResultContent};
+use rig::message::ToolResultContent;
 use rig::operation::Completion;
 use rig::prelude::*;
 use rig::providers::anthropic::{self, AnthropicConfig};
@@ -35,10 +35,12 @@ use rmcp::model::{ClientCapabilities, ClientConfig, Implementation};
 use rmcp::transport::StreamableHttpClientTransport;
 use serde::Deserialize;
 use serde_json::json;
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::mpsc;
 
 use events::{EventSender, UiEvent};
 use kb::KnowledgeBase;
+use store::{History, Store};
 use tools::*;
 
 const MAX_TOOL_RESULT_CHARS: usize = 4_000;
@@ -62,20 +64,10 @@ struct AppState {
     model_name: String,
     kb: Arc<KnowledgeBase>,
     mcp_tools: Vec<DynamicTool>,
-    sessions: Mutex<HashMap<String, Session>>,
-}
-
-#[derive(Default)]
-struct Session {
-    history: Vec<Message>,
-    workspace: SharedWorkspace,
+    store: Store,
 }
 
 impl AppState {
-    fn sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, Session>> {
-        self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// The main agent for one run, its tools bound to the session's workspace.
     fn agent(&self, workspace: &SharedWorkspace, events: EventSender) -> Agent {
         let ws = || workspace.clone();
@@ -128,26 +120,46 @@ struct SessionRequest {
     session_id: String,
 }
 
+fn internal_error(error: anyhow::Error) -> Response {
+    tracing::error!("{error:#}");
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error.to_string() }))).into_response()
+}
+
 /// Runs the agent on one message and streams what happens as SSE events.
-async fn chat(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<ChatRequest>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let (history, workspace) = {
-        let mut sessions = state.sessions();
-        let session = sessions.entry(request.session_id.clone()).or_default();
-        (session.history.clone(), session.workspace.clone())
+/// The history is loaded before the first model call and saved when the turn
+/// succeeds; the workspace is saved after every tool result.
+async fn chat(State(state): State<Arc<AppState>>, Json(request): Json<ChatRequest>) -> Response {
+    let session_id = request.session_id.clone();
+    // One turn per session at a time, also across replicas: two turns would
+    // edit the same plan and files, and the second history save would be refused.
+    let lock = match state.store.lock(&session_id).await {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            let error = "This chat is still working on a previous message.";
+            return (StatusCode::CONFLICT, Json(json!({ "error": error }))).into_response();
+        }
+        Err(error) => return internal_error(error),
+    };
+    let workspace = match state.store.load_workspace(&session_id).await {
+        Ok(workspace) => SharedWorkspace::new(workspace),
+        Err(error) => return internal_error(error),
     };
     let (sender, mut subagent_events) = mpsc::unbounded_channel();
     let agent = state.agent(&workspace, sender);
 
     let events = async_stream::stream! {
-        let mut run = agent
+        let _lock = lock;
+        yield UiEvent::Workspace(workspace.snapshot());
+        let runner = agent
             .prompt(request.message.clone())
-            .history(history)
+            .conversation(session_id.clone())
             .max_turns(40)
-            .add_hook(PlanGuard::new(workspace.clone()))
-            .stream();
+            .add_hook(PlanGuard::new(workspace.clone()));
+        let runner = match &state.store.history {
+            History::Postgres(store) => runner.memory(store.clone()),
+            History::Memory(store) => runner.memory(store.clone()),
+        };
+        let mut run = runner.stream();
         loop {
             // Subagents report through the channel while the main run waits on
             // their `task` calls, so both sources are polled together.
@@ -178,15 +190,17 @@ async fn chat(
                         content: clip(&result_text(&tool_result.content), MAX_TOOL_RESULT_CHARS),
                         is_error: tool_result.is_error,
                     };
-                    yield UiEvent::Workspace(workspace.snapshot());
+                    let snapshot = workspace.snapshot();
+                    // A pod that dies mid-turn then loses at most the last tool's change.
+                    if let Err(error) = state.store.save_workspace(&session_id, &snapshot).await {
+                        tracing::warn!("could not save the workspace of {session_id}: {error:#}");
+                    }
+                    yield UiEvent::Workspace(snapshot);
                 }
                 Ok(MultiTurnStreamItem::ModelTurnRetried { .. }) => {
                     yield UiEvent::DiscardDraft;
                 }
                 Ok(MultiTurnStreamItem::FinalResponse(response)) => {
-                    if let Some(session) = state.sessions().get_mut(&request.session_id) {
-                        session.history.extend(response.messages().iter().cloned());
-                    }
                     let usage = response.usage();
                     yield UiEvent::Done {
                         input_tokens: usage.input_tokens,
@@ -207,13 +221,21 @@ async fn chat(
         }
     };
 
-    Sse::new(events.map(|event| Ok(Event::default().json_data(event).unwrap_or_default())))
-        .keep_alive(KeepAlive::default())
+    let events = events.map(|event| Ok::<_, std::convert::Infallible>(Event::default().json_data(event).unwrap_or_default()));
+    Sse::new(events).keep_alive(KeepAlive::default()).into_response()
 }
 
-async fn reset(State(state): State<Arc<AppState>>, Json(request): Json<SessionRequest>) -> impl IntoResponse {
-    state.sessions().remove(&request.session_id);
-    Json(json!({ "ok": true }))
+async fn reset(State(state): State<Arc<AppState>>, Json(request): Json<SessionRequest>) -> Response {
+    match state.store.reset(&request.session_id).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+/// Ready once the knowledge base is loaded (before the server starts) and
+/// while the session store answers. The MCP tools are optional.
+async fn ready(State(state): State<Arc<AppState>>) -> StatusCode {
+    if state.store.ready().await { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }
 }
 
 async fn info(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -224,7 +246,13 @@ async fn info(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .iter()
         .map(|doc| json!({ "path": doc.path, "title": doc.title }))
         .collect();
-    Json(json!({ "model": state.model_name, "mcp_tools": mcp_tools, "documents": documents }))
+    Json(json!({
+        "model": state.model_name,
+        "mcp_tools": mcp_tools,
+        "documents": documents,
+        "store": state.store.kind(),
+        "pod": std::env::var("POD_NAME").ok(),
+    }))
 }
 
 fn result_text(content: &[ToolResultContent]) -> String {
@@ -256,11 +284,40 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
+    let addr = std::env::var("AGENT_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
+
+    // As PID 1 in a container the process ignores SIGTERM until it has a
+    // handler, so install one before the slow startup: a stop during startup
+    // then exits at once instead of waiting out the whole grace period.
+    let mut terminate = signal(SignalKind::terminate())?;
+    let state = tokio::select! {
+        state = start() => Arc::new(state?),
+        _ = terminate.recv() => return Ok(()),
+        _ = tokio::signal::ctrl_c() => return Ok(()),
+    };
+
+    let app = Router::new()
+        .route("/", get(|| async { Html(include_str!("../static/index.html")) }))
+        .route("/api/info", get(info))
+        .route("/api/chat", post(chat))
+        .route("/api/reset", post(reset))
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/readyz", get(ready))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tracing::info!("agent UI on http://{addr}");
+    // Running agent turns are open requests, so they finish before the process exits.
+    axum::serve(listener, app).with_graceful_shutdown(shutdown_signal(terminate)).await?;
+    Ok(())
+}
+
+/// The model, knowledge base, MCP tools and session store.
+async fn start() -> anyhow::Result<AppState> {
     let env = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_owned());
     let model_name = env("AGENT_MODEL", anthropic::completion::CLAUDE_SONNET_5_5);
     let kb_dir = PathBuf::from(env("KB_DIR", concat!(env!("CARGO_MANIFEST_DIR"), "/../knowledge-base")));
     let mcp_url = env("MCP_URL", "http://127.0.0.1:8081/mcp");
-    let addr = env("AGENT_ADDR", "127.0.0.1:3000");
 
     let model = AnthropicConfig::from_env()?.client().completion(model_name.as_str()).erase();
 
@@ -283,45 +340,24 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let state = Arc::new(AppState {
+    let store = Store::open(std::env::var("DATABASE_URL").ok().filter(|url| !url.is_empty())).await?;
+    tracing::info!("sessions are kept in {}", store.kind());
+
+    Ok(AppState {
         model,
         model_name,
         kb: Arc::new(kb),
         mcp_tools,
-        sessions: Mutex::default(),
-    });
+        store,
+    })
 
-    let app = Router::new()
-        .route("/", get(|| async { Html(include_str!("../static/index.html")) }))
-        .route("/api/info", get(info))
-        .route("/api/chat", post(chat))
-        .route("/api/reset", post(reset))
-        .route("/healthz", get(|| async { "ok" }))
-        // The server only starts once the knowledge base is loaded, so serving means ready.
-        // The MCP tools are optional: the agent works without them.
-        .route("/readyz", get(|| async { "ok" }))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("agent UI on http://{addr}");
-    // Running agent turns are open requests, so they finish before the process exits.
-    axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;
-    Ok(())
 }
 
 /// Resolves on Ctrl-C or SIGTERM (what Kubernetes and Docker send on stop).
-async fn shutdown_signal() {
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(_) => std::future::pending().await,
-        }
-    };
+async fn shutdown_signal(mut terminate: Signal) {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
-        _ = terminate => {}
+        _ = terminate.recv() => {}
     }
     tracing::info!("shutting down; waiting for running requests to finish");
 }

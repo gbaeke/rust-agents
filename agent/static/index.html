@@ -256,6 +256,11 @@ async function send() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: sessionId, message: text }),
     });
+    // 409: a previous message of this chat is still running (maybe in another tab).
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error ?? `HTTP ${response.status}`);
+    }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -272,7 +277,7 @@ async function send() {
       }
     }
   } catch (error) {
-    handle({ type: "error", message: String(error) });
+    handle({ type: "error", message: error.message ?? String(error) });
   } finally {
     busy = false;
     $("send").disabled = false;
