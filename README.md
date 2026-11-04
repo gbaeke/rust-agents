@@ -48,6 +48,25 @@ Both binaries are built as fully static musl executables. TLS uses rustls with a
 
 The MCP server is **stateless**: `legacy_session_mode(false)` means it gives out no `Mcp-Session-Id`, so you can scale it to several replicas behind a load balancer. `MCP_ALLOWED_HOSTS` lists the hostnames it accepts, as protection against DNS rebinding. It defaults to loopback only, so compose sets it to `mcp-server`.
 
+## Run it on Kubernetes (kind)
+
+`kind/` holds a local cluster that any app can use. It knows nothing about this repo (see `kind/README.md`). `deploy/` deploys this repo's two services to it.
+
+```sh
+kind/cluster.sh install     # once: kind, kubectl, helm
+kind/cluster.sh up          # one control-plane node and two workers; host ports 30000-30009 reach NodePorts
+deploy/deploy.sh            # build, load into kind, apply deploy/k8s, wait for the rollout
+open http://omarchy:30000
+```
+
+- `deploy/deploy.sh` can be run again after code changes. `deploy/deploy.sh delete` removes the app.
+- `kind/cluster.sh stop` and `start` pause the cluster and resume it, keeping its state.
+- Everything runs in the namespace `rust-agents`, which enforces the `restricted` Pod Security Standard.
+- The MCP server runs as 2 replicas. The agent runs as 1, because its sessions are in memory.
+- The API key goes into the Secret `agent-secrets`, taken from `.env`. Other settings are in the generated ConfigMap `agent-config` in `deploy/k8s/kustomization.yaml`.
+- On SIGTERM, both servers stop accepting requests and let running ones finish. A rollout or pod delete waits for the agent turn in progress, for up to 120s.
+- Health endpoints: `/healthz` on both servers, and `/readyz` on the agent.
+
 ## What the agent can do
 
 The design follows LangChain's Deep Agents:

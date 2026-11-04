@@ -222,6 +222,8 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        // No colour codes when the output is not a terminal, e.g. `kubectl logs`.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     let addr = std::env::var("MCP_ADDR").unwrap_or_else(|_| "127.0.0.1:8081".to_owned());
@@ -235,11 +237,30 @@ async fn main() -> anyhow::Result<()> {
         .with_json_response(true)
         .with_allowed_hosts(allowed_hosts.split(',').map(str::trim).filter(|host| !host.is_empty()));
     let service = StreamableHttpService::new(|| Ok(Toolbox::new()), LocalSessionManager::default().into(), config);
-    let router = axum::Router::new().nest_service("/mcp", service);
+    let router = axum::Router::new()
+        .nest_service("/mcp", service)
+        .route("/healthz", axum::routing::get(|| async { "ok" }));
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("MCP server listening on http://{addr}/mcp");
-    axum::serve(listener, router).await?;
+    axum::serve(listener, router).with_graceful_shutdown(shutdown_signal()).await?;
     Ok(())
+}
+
+/// Resolves on Ctrl-C or SIGTERM (what Kubernetes and Docker send on stop).
+async fn shutdown_signal() {
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate => {}
+    }
+    tracing::info!("shutting down; waiting for running requests to finish");
 }
 
 #[cfg(test)]

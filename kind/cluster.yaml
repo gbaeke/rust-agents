@@ -1,0 +1,27 @@
+# A local multi-node cluster for any app, not tied to one project.
+#
+# Apps are reached from other machines through NodePorts 30000-30009: each
+# one is published on the same host port, so an app whose Service uses
+# nodePort 30000 is at http://<host>:30000. Host port == node port keeps the
+# ufw-docker rule simple (it matches the container port):
+#   sudo ufw route allow proto tcp from any to any port 30000:30009
+#
+# Port mappings can only be set when the cluster is created; add more here
+# and recreate (cluster.sh down && cluster.sh up) if 10 is not enough.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - { containerPort: 30000, hostPort: 30000, listenAddress: "0.0.0.0" }
+      - { containerPort: 30001, hostPort: 30001, listenAddress: "0.0.0.0" }
+      - { containerPort: 30002, hostPort: 30002, listenAddress: "0.0.0.0" }
+      - { containerPort: 30003, hostPort: 30003, listenAddress: "0.0.0.0" }
+      - { containerPort: 30004, hostPort: 30004, listenAddress: "0.0.0.0" }
+      - { containerPort: 30005, hostPort: 30005, listenAddress: "0.0.0.0" }
+      - { containerPort: 30006, hostPort: 30006, listenAddress: "0.0.0.0" }
+      - { containerPort: 30007, hostPort: 30007, listenAddress: "0.0.0.0" }
+      - { containerPort: 30008, hostPort: 30008, listenAddress: "0.0.0.0" }
+      - { containerPort: 30009, hostPort: 30009, listenAddress: "0.0.0.0" }
+  - role: worker
+  - role: worker

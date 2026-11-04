@@ -1,0 +1,59 @@
+# One replica: chat sessions live in the pod's memory, so a second replica
+# could get a follow-up message without its history (phase 2 fixes this).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: agent }
+  template:
+    metadata:
+      labels: { app: agent }
+    spec:
+      automountServiceAccountToken: false
+      # A deep-agent turn can take minutes; SIGTERM lets it finish first.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: agent
+          image: rust-agents/agent:dev
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: agent-config }
+            - secretRef: { name: agent-secrets }   # ANTHROPIC_API_KEY, created by deploy/deploy.sh
+          ports:
+            - { name: http, containerPort: 3000 }
+          # Liveness only starts once this passes; startup waits up to 60s for the MCP server.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent
+spec:
+  type: NodePort
+  selector: { app: agent }
+  ports:
+    # The kind cluster publishes NodePorts 30000-30009 on the same host port.
+    - { name: http, port: 3000, targetPort: http, nodePort: 30000 }

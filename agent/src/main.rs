@@ -252,6 +252,8 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        // No colour codes when the output is not a terminal, e.g. `kubectl logs`.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     let env = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_owned());
@@ -267,8 +269,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Retry for a few seconds: in containers both servers start at the same time.
     let mut mcp_tools = Vec::new();
+    // Each attempt is capped: a connect to a pod that is going away can otherwise hang for 30s.
     for attempt in 1..=10 {
-        match connect_mcp(&mcp_url).await {
+        let connect = tokio::time::timeout(std::time::Duration::from_secs(2), connect_mcp(&mcp_url));
+        match connect.await.unwrap_or_else(|_| Err(anyhow::anyhow!("timed out"))) {
             Ok(tools) => {
                 tracing::info!("connected to MCP server at {mcp_url} with {} tools", tools.len());
                 mcp_tools = tools;
@@ -292,10 +296,32 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/info", get(info))
         .route("/api/chat", post(chat))
         .route("/api/reset", post(reset))
+        .route("/healthz", get(|| async { "ok" }))
+        // The server only starts once the knowledge base is loaded, so serving means ready.
+        // The MCP tools are optional: the agent works without them.
+        .route("/readyz", get(|| async { "ok" }))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("agent UI on http://{addr}");
-    axum::serve(listener, app).await?;
+    // Running agent turns are open requests, so they finish before the process exits.
+    axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;
     Ok(())
+}
+
+/// Resolves on Ctrl-C or SIGTERM (what Kubernetes and Docker send on stop).
+async fn shutdown_signal() {
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate => {}
+    }
+    tracing::info!("shutting down; waiting for running requests to finish");
 }
