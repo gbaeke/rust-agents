@@ -2,21 +2,13 @@
 //!
 //! Documents are split into sections at `#`/`##`/`###` headings. Each section
 //! is one searchable chunk, so a hit points the agent at a specific part of a
-//! document, which it can then read in full with `read_document`.
+//! document, which it can then read in full with `read_document`. Tokenizing
+//! (stemming, stop words) and BM25 scoring come from the `bm25` crate.
 
-use std::collections::HashMap;
 use std::path::Path;
 
+use bm25::{Language, SearchEngine, SearchEngineBuilder};
 use serde::Serialize;
-
-const K1: f64 = 1.2;
-const B: f64 = 0.75;
-
-const STOPWORDS: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "how", "i", "in", "is",
-    "it", "its", "of", "on", "or", "our", "that", "the", "their", "this", "to", "was", "we", "what", "when",
-    "which", "who", "will", "with", "you", "your", "do", "does", "can",
-];
 
 pub struct Document {
     pub path: String,
@@ -28,36 +20,21 @@ struct Chunk {
     doc: usize,
     heading: String,
     text: String,
-    terms: HashMap<String, u32>,
-    len: u32,
 }
 
 pub struct KnowledgeBase {
     pub documents: Vec<Document>,
     chunks: Vec<Chunk>,
-    doc_freq: HashMap<String, u32>,
-    avg_len: f64,
+    /// Indexes the chunks; a search result's id is the chunk's position.
+    engine: SearchEngine<usize>,
 }
 
 #[derive(Serialize)]
 pub struct Hit {
     pub document: String,
     pub section: String,
-    pub score: f64,
+    pub score: f32,
     pub snippet: String,
-}
-
-fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
-        .filter(|word| !STOPWORDS.contains(&word.as_str()))
-        // A crude stemmer: "credits" and "credit" should match.
-        .map(|word| match word.strip_suffix('s') {
-            Some(stem) if stem.len() > 3 && !stem.ends_with('s') => stem.to_owned(),
-            _ => word,
-        })
-        .collect()
 }
 
 fn sections(content: &str) -> Vec<(String, String)> {
@@ -106,57 +83,37 @@ impl KnowledgeBase {
     }
 
     fn index(documents: Vec<Document>) -> Self {
-        let mut chunks = Vec::new();
-        let mut doc_freq: HashMap<String, u32> = HashMap::new();
-        for (doc, document) in documents.iter().enumerate() {
-            for (heading, text) in sections(&document.content) {
-                // The title and heading are indexed too: "SLA credits" should
-                // find the section headed "Service credits" in the SLA document.
-                let tokens = tokenize(&format!("{} {heading} {text}", document.title));
-                let mut terms = HashMap::new();
-                for token in &tokens {
-                    *terms.entry(token.clone()).or_insert(0) += 1;
-                }
-                for term in terms.keys() {
-                    *doc_freq.entry(term.clone()).or_insert(0) += 1;
-                }
-                chunks.push(Chunk { doc, heading, text, terms, len: tokens.len() as u32 });
-            }
-        }
-        let avg_len = chunks.iter().map(|chunk| chunk.len as f64).sum::<f64>() / chunks.len().max(1) as f64;
-        Self { documents, chunks, doc_freq, avg_len }
+        let chunks: Vec<Chunk> = documents
+            .iter()
+            .enumerate()
+            .flat_map(|(doc, document)| {
+                sections(&document.content)
+                    .into_iter()
+                    .map(move |(heading, text)| Chunk { doc, heading, text })
+            })
+            .collect();
+        // The title and heading are indexed too: "SLA credits" should find
+        // the section headed "Service credits" in the SLA document.
+        let corpus = chunks.iter().enumerate().map(|(id, chunk)| bm25::Document {
+            id,
+            contents: format!("{} {} {}", documents[chunk.doc].title, chunk.heading, chunk.text),
+        });
+        let engine = SearchEngineBuilder::with_documents(Language::English, corpus).build();
+        Self { documents, chunks, engine }
     }
 
     pub fn search(&self, query: &str, top_k: usize) -> Vec<Hit> {
-        let query = tokenize(query);
-        let n = self.chunks.len() as f64;
-        let mut scored: Vec<(f64, &Chunk)> = self
-            .chunks
-            .iter()
-            .map(|chunk| {
-                let score = query
-                    .iter()
-                    .filter_map(|term| {
-                        let tf = *chunk.terms.get(term)? as f64;
-                        let df = *self.doc_freq.get(term)? as f64;
-                        let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-                        let norm = K1 * (1.0 - B + B * chunk.len as f64 / self.avg_len);
-                        Some(idf * tf * (K1 + 1.0) / (tf + norm))
-                    })
-                    .sum::<f64>();
-                (score, chunk)
-            })
-            .filter(|(score, _)| *score > 0.0)
-            .collect();
-        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-        scored
+        self.engine
+            .search(query, top_k)
             .into_iter()
-            .take(top_k)
-            .map(|(score, chunk)| Hit {
-                document: self.documents[chunk.doc].path.clone(),
-                section: chunk.heading.clone(),
-                score: (score * 100.0).round() / 100.0,
-                snippet: snippet(&chunk.text, 600),
+            .map(|result| {
+                let chunk = &self.chunks[result.document.id];
+                Hit {
+                    document: self.documents[chunk.doc].path.clone(),
+                    section: chunk.heading.clone(),
+                    score: (result.score * 100.0).round() / 100.0,
+                    snippet: snippet(&chunk.text, 600),
+                }
             })
             .collect()
     }

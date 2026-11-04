@@ -54,7 +54,7 @@ The design follows LangChain's Deep Agents:
 
 - **Planning:** `write_todos` keeps a todo list. The UI shows it live in the Plan tab.
 - **Scratch filesystem:** `ls`, `read_file`, `write_file` and `edit_file` work on files kept in the session's memory. Reports and drafts appear in the Files tab.
-- **Agentic RAG:** the knowledge base in `knowledge-base/` (a fictional robotics company) is split into sections and indexed with BM25 (`agent/src/kb.rs`, no embedding service needed). The agent decides itself what to search for, rephrases queries, and reads full documents when it needs whole tables.
+- **Agentic RAG:** the knowledge base in `knowledge-base/` (a fictional robotics company) is split into sections (`agent/src/kb.rs`) and indexed with the [`bm25`](https://crates.io/crates/bm25) crate (Snowball stemming, stop words, no embedding service needed). The agent decides itself what to search for, rephrases queries, and reads full documents when it needs whole tables.
 - **Subagents:** `task` starts a research subagent with its own context and the knowledge-base and MCP tools, and returns only its report. Several `task` calls in one turn give parallel research. Subagent steps stream to the Activity tab.
 - **MCP tools:** the agent is told to use `calculate` for all arithmetic. The other MCP tools give it live data (weather, time, web pages).
 
@@ -65,7 +65,7 @@ Try the example prompts in the UI. Answering the SLA-credit questions takes the 
 - `mcp-server/src/main.rs`: rmcp `#[tool_router]` server.
 - `agent/src/main.rs`: axum app, sessions, agent assembly, and the SSE translation of rig's `MultiTurnStreamItem`.
 - `agent/src/tools/`: rig `Tool` implementations. Argument schemas are generated from Rust types with `schemars`.
-- `agent/src/kb.rs`: chunking and BM25.
+- `agent/src/kb.rs`: chunking by section, plus BM25 search through the `bm25` crate.
 
 ## Notes
 
