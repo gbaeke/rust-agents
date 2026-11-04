@@ -17,6 +17,7 @@ if [[ "${1:-}" == delete ]]; then
 fi
 
 kind get clusters 2>/dev/null | grep -qx "$CLUSTER" || { echo "no kind cluster $CLUSTER; run: kind/cluster.sh up" >&2; exit 1; }
+k get gatewayclass agentgateway >/dev/null 2>&1 || { echo "agentgateway is not installed; run: kind/agentgateway.sh install" >&2; exit 1; }
 key_line="$(grep -E '^ANTHROPIC_API_KEY=.+' .env 2>/dev/null || true)"
 [[ -n "$key_line" ]] || { echo "ANTHROPIC_API_KEY is missing from .env" >&2; exit 1; }
 
@@ -27,9 +28,11 @@ kind load docker-image rust-agents/agent:dev rust-agents/mcp-server:dev --name "
 
 first_install=$(k -n "$NAMESPACE" get deployment agent >/dev/null 2>&1 && echo no || echo yes)
 k apply -f deploy/k8s/namespace.yaml
-# Only the key goes into the Secret, read from stdin so it never shows up in `ps`.
-k -n "$NAMESPACE" create secret generic agent-secrets --from-env-file=/dev/stdin \
-  --dry-run=client -o yaml <<<"$key_line" | k apply -f -
+# The key goes only to the gateway (the agent pods never see it), read
+# from stdin so it never shows up in `ps`.
+k -n "$NAMESPACE" create secret generic anthropic --from-env-file=/dev/stdin \
+  --dry-run=client -o yaml <<<"Authorization=${key_line#ANTHROPIC_API_KEY=}" | k apply -f -
+k -n "$NAMESPACE" delete secret agent-secrets --ignore-not-found >/dev/null
 # The database password is made once and then kept: the database's data
 # volume was initialised with it.
 if ! k -n "$NAMESPACE" get secret postgres >/dev/null 2>&1; then
@@ -37,6 +40,8 @@ if ! k -n "$NAMESPACE" get secret postgres >/dev/null 2>&1; then
 fi
 k apply -k deploy/k8s
 k -n "$NAMESPACE" rollout status statefulset/postgres --timeout=180s
+k -n "$NAMESPACE" wait --for=condition=Programmed gateway/agentgateway --timeout=120s
+k -n "$NAMESPACE" rollout status deployment/agentgateway --timeout=120s
 
 # Same tag after a rebuild, so restart to pick up the newly loaded images.
 # Not on a first install: the pods were just created from them.

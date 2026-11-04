@@ -7,11 +7,18 @@ resources:
   - mcp-server.yaml
   - agent.yaml
   - disruption-budgets.yaml
+  - gateway.yaml
+  - network-policies.yaml
 configMapGenerator:
   - name: agent-config
     literals:
+      # Must be a model declared as an AgentgatewayModel in gateway.yaml.
       - AGENT_MODEL=claude-sonnet-5-5
       - AGENT_ADDR=0.0.0.0:3000
-      - MCP_URL=http://mcp-server:8081/mcp
+      # Model and tool traffic both go through this app's agentgateway proxy.
+      - ANTHROPIC_BASE_URL=http://agentgateway:8080
+      - MCP_URL=http://agentgateway:8080/mcp
+      # rig needs some key; the gateway replaces it with the real one.
+      - ANTHROPIC_API_KEY=set-by-agentgateway
       - KB_DIR=/knowledge-base
       - SESSION_TTL_DAYS=7

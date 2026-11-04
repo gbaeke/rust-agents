@@ -24,6 +24,11 @@ Phase 2 as built:
   - Reset: no rows left.
   - Local run without a database: in memory.
 - Session expiry (added after review): each turn touches its `agent_workspaces` row first. Hourly, under a Postgres lock, one replica deletes rows idle for longer than `SESSION_TTL_DAYS` (default 7) and every `rig_memory_*` log that has no row. Verified with a chat backdated by 8 days.
+- agentgateway (added after phase 2): every model and MCP call goes through a per-app agentgateway v1.7.0 proxy. Things found while building it:
+  - The proxy needed a seccomp profile to pass the restricted profile.
+  - Claude is an `AgentgatewayModel`, the recommended resource for the common case, rather than a backend plus route. With a backend plus route, the gateway answered in OpenAI's format unless `routes: {/v1/messages: Messages}` was set. The listener has to list `AgentgatewayModel` in `allowedRoutes.kinds`. Only declared models are served.
+  - rmcp 3.8 offers MCP protocol `2026-07-28` on `initialize`, which the gateway refuses, so the agent asks for `LATEST_WITH_INITIALIZE` (2025-11-25).
+  - NetworkPolicies (kindnet enforces them) make the gateway the only way out.
 - Memory, idle: agent ~10 MiB per pod, mcp-server ~3 MiB, postgres ~37 MiB; the kind cluster itself ~1.3 GiB.
 
 ## Goal

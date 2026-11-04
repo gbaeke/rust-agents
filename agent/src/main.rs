@@ -31,7 +31,7 @@ use rig::tool::DynamicTool;
 use rig::tool::rmcp::McpConnection;
 use rig::DynModel;
 use rmcp::ServiceExt;
-use rmcp::model::{ClientCapabilities, ClientConfig, Implementation};
+use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, ProtocolVersion};
 use rmcp::transport::StreamableHttpClientTransport;
 use serde::Deserialize;
 use serde_json::json;
@@ -94,10 +94,13 @@ impl AppState {
 }
 
 async fn connect_mcp(url: &str) -> anyhow::Result<Vec<DynamicTool>> {
+    // The newest protocol version without `initialize`: rmcp offers 2026-07-28
+    // by default, which agentgateway refuses on an `initialize` request.
     let config = ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new("rust-agents", env!("CARGO_PKG_VERSION")),
-    );
+    )
+    .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE);
     let transport = StreamableHttpClientTransport::from_uri(url);
     // The tools hold the connection open for as long as they live.
     let connection = McpConnection::new(config.serve(transport).await?);

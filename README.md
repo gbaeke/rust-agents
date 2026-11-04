@@ -57,6 +57,7 @@ The MCP server is **stateless**: `legacy_session_mode(false)` means it gives out
 ```sh
 kind/cluster.sh install     # once: kind, kubectl, helm
 kind/cluster.sh up          # one control-plane node and two workers; host ports 30000-30009 reach NodePorts
+kind/agentgateway.sh install   # once per cluster: the agentgateway controller
 deploy/deploy.sh            # build, load into kind, apply deploy/k8s, wait for the rollout
 open http://omarchy:30000
 ```
@@ -65,6 +66,12 @@ open http://omarchy:30000
 - `kind/cluster.sh stop` and `start` pause the cluster and resume it, keeping its state.
 - Everything runs in the namespace `rust-agents`, which enforces the `restricted` Pod Security Standard.
 - The agent is **stateless** and runs as 3 replicas. History, plan and files are in Postgres (a StatefulSet with a 1 Gi volume), so any pod can take any message. A turn stays on one pod because it is one HTTP request. The MCP server runs as 2 replicas. Disruption budgets keep at least one of each running.
+- **All model and tool traffic goes through agentgateway** (`deploy/k8s/gateway.yaml`). The app has its own proxy, 2 replicas, reachable only inside the cluster. The agent pods get `ANTHROPIC_BASE_URL=http://agentgateway:8080` and `MCP_URL=http://agentgateway:8080/mcp`.
+  - The real API key is only in the gateway's Secret `anthropic`. The agent sends a placeholder, and the gateway replaces it.
+  - Claude is an `AgentgatewayModel` (`claude-sonnet-5-5`) on the gateway's listener. The gateway serves Anthropic's own `/v1/messages` and lists its models at `/v1/models`. **Only declared models are served**, so to change `AGENT_MODEL`, add an `AgentgatewayModel` for the new model too. The MCP server is an `AgentgatewayBackend` behind an HTTPRoute on `/mcp` of the same listener.
+  - MCP uses `sessionRouting: Stateless`, because the MCP server keeps no sessions either.
+  - NetworkPolicies enforce the gateway: agent pods may only reach the gateway, Postgres and DNS, and the MCP server only accepts requests from the gateway.
+  - The gateway's log (`kubectl -n rust-agents logs deploy/agentgateway`) has one line per model call, with model and token counts, and one per MCP method.
 - The database password is the Secret `postgres`. `deploy.sh` makes it once and then keeps it.
 - The API key goes into the Secret `agent-secrets`, taken from `.env`. Other settings are in the generated ConfigMap `agent-config` in `deploy/k8s/kustomization.yaml`.
 - On SIGTERM, both servers stop accepting requests and let running ones finish. A rollout or pod delete waits for the agent turn in progress, for up to 120s.

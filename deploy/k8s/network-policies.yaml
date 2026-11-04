@@ -1,0 +1,40 @@
+# Model and tool traffic must go through agentgateway: the agent may only
+# talk to the gateway, Postgres and DNS, and the MCP server only takes
+# requests from the gateway. The gateway itself may go anywhere (Claude's API).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-egress
+spec:
+  podSelector:
+    matchLabels: { app: agent }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { gateway.networking.k8s.io/gateway-name: agentgateway }
+      ports: [{ port: 8080 }]
+    - to:
+        - podSelector:
+            matchLabels: { app: postgres }
+      ports: [{ port: 5432 }]
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-server-ingress
+spec:
+  podSelector:
+    matchLabels: { app: mcp-server }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { gateway.networking.k8s.io/gateway-name: agentgateway }
+      ports: [{ port: 8081 }]

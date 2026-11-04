@@ -32,6 +32,14 @@ kind load docker-image my-app:dev --name dev
 
 Use a tag other than `:latest` and set `imagePullPolicy: IfNotPresent`. With `:latest`, Kubernetes tries to pull the image from Docker Hub.
 
+## agentgateway
+
+`kind/agentgateway.sh install` adds [agentgateway](https://agentgateway.dev) in Kubernetes mode. It installs the Gateway API CRDs (v1.6.3), agentgateway's CRDs and its controller (v1.7.0) in `agentgateway-system`. Set `AGENTGATEWAY_VERSION` or `GATEWAY_API_VERSION` to install other versions. `status` shows the controller and every Gateway, and `uninstall` removes the controller.
+
+Only the controller is shared. Each app creates its own `Gateway` with `gatewayClassName: agentgateway` in its own namespace, and the controller runs a proxy for it. Each app then has its own backends, routes, keys and policies.
+
+In a namespace with the restricted profile, the proxy needs a seccomp profile, set through `AgentgatewayParameters`. See `deploy/k8s/gateway.yaml` in this repo for an example.
+
 ## Pod security
 
 Give every app its own namespace and enforce the `restricted` Pod Security Standard on it:

@@ -31,7 +31,6 @@ spec:
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef: { name: agent-config }
-            - secretRef: { name: agent-secrets }   # ANTHROPIC_API_KEY, created by deploy/deploy.sh
           env:
             - name: POD_NAME
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
